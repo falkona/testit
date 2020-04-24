@@ -1,0 +1,279 @@
+version: '3.4'
+
+x-logging:
+  &default-logging
+  driver: "json-file"
+  options:
+    max-size: "500m"
+    max-file: "2"
+
+services:
+  frontend:
+    image: "${DOCKER_REGISTRY}/frontend:${CONTAINER_VERSION}"
+    ports:
+      - "0.0.0.0:80:80"
+    logging: *default-logging
+    environment:
+      SSL_CERTIFICATE: "${SSL_CERTIFICATE:-}"
+      SSL_CERTIFICATE_KEY: "${SSL_CERTIFICATE_KEY:-}"
+      REDIRECT_TO_HTTPS: "${REDIRECT_TO_HTTPS:-}"
+    volumes:
+      - ssl-volume:/etc/nginx/ssl
+    networks:
+      testit_network:
+    depends_on:
+      - webapi
+      - avatars.api
+    restart: unless-stopped
+
+  webapi:
+    image: "${DOCKER_REGISTRY}/webapi:${CONTAINER_VERSION}"
+    logging: *default-logging
+    environment:
+      FRONTEND_URL: "${FRONTEND_URL}"
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT}"
+      AWS_ACCESS_KEY: "${AWS_ACCESS_KEY}"
+      AWS_SECRET_KEY: "${AWS_SECRET_KEY}"
+      DB_CONNECTION_STRING: "${DB_CONNECTION_STRING}"
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS}"
+      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_DEFAULT_VHOST}"
+      RABBITMQ_DEFAULT_HOST: "${RABBITMQ_DEFAULT_HOST}"
+      RABBITMQ_DEFAULT_PORT: "${RABBITMQ_DEFAULT_PORT}"
+    networks:
+      testit_network:
+    depends_on:
+      - minio
+      - db
+      - rabbitmq      
+      - elasticsearch
+      - auth
+      - license-service
+      - influxdb
+    restart: unless-stopped
+
+  db:
+    image: postgres:10
+    command: postgres -c 'max_connections=300'
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - db-volume:/var/lib/postgresql/data
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-alpine
+    logging: *default-logging
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS}"
+      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_DEFAULT_VHOST}"
+    volumes:
+      - rabbit-volume:/var/lib/rabbitmq
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  rabbitmqconsumer:
+    image: "${DOCKER_REGISTRY}/rabbitmqconsumer:${CONTAINER_VERSION}"
+    logging: *default-logging
+    environment:
+      FRONTEND_URL: "${FRONTEND_URL}"
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT}"
+      DB_CONNECTION_STRING: "${DB_CONNECTION_STRING}"
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS}"
+      RABBITMQ_DEFAULT_VHOST: "${RABBITMQ_DEFAULT_VHOST}"
+      RABBITMQ_DEFAULT_HOST: "${RABBITMQ_DEFAULT_HOST}"
+      RABBITMQ_DEFAULT_PORT: "${RABBITMQ_DEFAULT_PORT}"
+    networks:
+      testit_network:
+    depends_on:
+      - auth
+      - db
+      - elasticsearch
+      - rabbitmq
+      - license-service
+      - influxdb
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.4.2
+    logging: *default-logging
+    environment:
+      ES_JAVA_OPTS: "-Xms1024m -Xmx1024m"
+      bootstrap.memory_lock: "true"
+      cluster.name: "elasticsearch"
+      discovery.zen.minimum_master_nodes: "1"
+      discovery.type: "single-node"
+      network.host: "0.0.0.0"
+      http.port: "9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elastic-volume:/usr/share/elasticsearch/data
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2019-08-21T19-40-07Z
+    logging: *default-logging
+    volumes:
+      - minio-export-volume:/export
+      - minio-data-volume:/data
+    environment:
+      MINIO_ACCESS_KEY: "${AWS_ACCESS_KEY}"
+      MINIO_SECRET_KEY: "${AWS_SECRET_KEY}"
+    networks:
+      testit_network:
+    command: server /data
+    restart: unless-stopped
+
+  auth:
+    image: "${DOCKER_REGISTRY}/authwebapi:${CONTAINER_VERSION}"
+    logging: *default-logging
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT}"
+      ASPNETCORE_ACCESS_TOKEN_EXPIRATION_MINUTES: "${ASPNETCORE_ACCESS_TOKEN_EXPIRATION_MINUTES}"
+      ASPNETCORE_REFRESH_TOKEN_EXPIRATION_MINUTES: "${ASPNETCORE_REFRESH_TOKEN_EXPIRATION_MINUTES}"
+      AUTH_CONNECTION_STRING: "${AUTH_CONNECTION_STRING}"
+    networks:
+      testit_network:
+    depends_on:
+      - authdb
+      - ldapwebapi
+      - auth-cache
+    restart: unless-stopped
+
+  authdb:
+    image: postgres:10
+    command: postgres -c 'max_connections=300'
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: "${POSTGRES_AUTH_DB}"
+      POSTGRES_USER: "${POSTGRES_AUTH_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_AUTH_PASSWORD}"
+    volumes:
+      - authdb-volume:/var/lib/postgresql/data
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  ldapwebapi:
+    image: "${DOCKER_REGISTRY}/ldapwebapi:${CONTAINER_VERSION}"
+    logging: *default-logging
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  auth-cache:
+    image: redis:5.0.5
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - auth-cache-volume:/data
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  license-service:
+    image: "${DOCKER_REGISTRY}/licenseservicewebapi:${CONTAINER_VERSION}"
+    logging: *default-logging
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT}"    
+    volumes:
+      - license-volume:/var/meistersoft/licensing
+      - verification-volume:/var/meistersoft/verification
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+  avatars.api:
+    image: "${DOCKER_REGISTRY}/avatars-api:${CONTAINER_VERSION}"
+    logging: *default-logging
+    environment:
+      ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT}"
+      AVATARS_AWS_ACCESS_KEY: "${AVATARS_AWS_ACCESS_KEY}"
+      AVATARS_AWS_SECRET_KEY: "${AVATARS_AWS_SECRET_KEY}"
+      AVATARS_CONNECTION_STRING: "${AVATARS_CONNECTION_STRING}"
+    depends_on:
+      - avatars.minio
+      - avatars.db
+    networks:
+      testit_network:
+        aliases:      
+          - avatars-api
+    restart: unless-stopped
+
+  avatars.minio:
+    image: minio/minio:RELEASE.2019-08-21T19-40-07Z
+    logging: *default-logging
+    volumes:
+      - avatars-minio-export-volume:/export
+      - avatars-minio-data-volume:/data
+    environment:
+      MINIO_ACCESS_KEY: "${AVATARS_AWS_ACCESS_KEY}"
+      MINIO_SECRET_KEY: "${AVATARS_AWS_SECRET_KEY}"
+    networks:
+      testit_network:
+        aliases:
+          - avatars-minio
+    command: server /data
+    restart: unless-stopped
+
+  avatars.db:
+    image: postgres:10
+    command: postgres -c 'max_connections=300'
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: "${POSTGRES_AVATARS_DB}"
+      POSTGRES_USER: "${POSTGRES_AVATARS_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_AVATARS_PASSWORD}"
+    volumes:
+      - avatars.db-volume:/var/lib/postgresql/data
+    networks:
+      testit_network:
+        aliases:
+          - avatars-db
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:1.7.8
+    logging: *default-logging
+    environment:
+      INFLUXDB_DATA_ENGINE: tsm1
+      INFLUXDB_REPORTING_DISABLED: "true"
+      INFLUXDB_DATA_MAX_VALUES_PER_TAG: 0
+      INFLUXDB_DATA_MAX_SERIES_PER_DATABASE: 0
+    volumes:
+      - influx-volume:/var/lib/influxdb
+    networks:
+      testit_network:
+    restart: unless-stopped
+
+networks:
+  testit_network:
+
+volumes:
+  elastic-volume:
+  minio-export-volume:
+  minio-data-volume:
+  avatars-minio-export-volume:
+  avatars-minio-data-volume:
+  authdb-volume:
+  db-volume:
+  rabbit-volume:
+  license-volume:
+  verification-volume:
+  avatars.db-volume:
+  influx-volume:
+  auth-cache-volume:
+  ssl-volume:
